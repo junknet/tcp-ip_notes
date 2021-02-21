@@ -86,6 +86,10 @@ int main(int argc, char *argv[]) {
 
 ### IO复用问题
 
+### 端口复用 打内网   
+
+setsockopt（） SO_REUSEADDR ，
+
 #### 概念:
 
  **I/O multiplexing 这里面的 multiplexing 指的其实是在单个线程通过记录跟踪每一个Sock(I/O流)的状态(对应空管塔里面的Fight progress strip槽)来同时管理多个I/O流**. 
