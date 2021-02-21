@@ -86,6 +86,14 @@ int main(int argc, char *argv[]) {
 
 ### IO复用问题
 
+#### 概念:
+
+ **I/O multiplexing 这里面的 multiplexing 指的其实是在单个线程通过记录跟踪每一个Sock(I/O流)的状态(对应空管塔里面的Fight progress strip槽)来同时管理多个I/O流**. 
+
+![image-20210221225330677](README.assets/image-20210221225330677.png)
+
+*ngnix会有很多链接进来， epoll会把他们都监视起来，然后像拨开关一样，谁有数据就拨向谁，然后调用相应的代码处理*
+
 #### select
 
 ```c
