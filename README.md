@@ -84,3 +84,148 @@ int main(int argc, char *argv[]) {
 }
 ```
 
+### IO复用问题
+
+#### select
+
+```c
+#include <sys/select.h>
+
+/* According to earlier standards */
+#include <sys/time.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+int select(int nfds, fd_set *readfds, fd_set *writefds,
+        fd_set *exceptfds, struct timeval *timeout);
+
+int pselect(int nfds, fd_set *readfds, fd_set *writefds,
+        fd_set *exceptfds, const struct timespec *timeout,
+        const sigset_t *sigmask);
+// 控制fd 和控制组的关系
+void FD_CLR(int fd, fd_set *set);   // 移除组
+int  FD_ISSET(int fd, fd_set *set); //检测是否存在
+void FD_SET(int fd, fd_set *set); // 添加到组
+void FD_ZERO(fd_set *set);  //清空组
+```
+
+##### 缺陷
+
+1. 通过监视 fd set 组内发生变换的fd，找出可用fd，必然发生轮询
+2. fd set 发生变化，调用select时进行比较需先保存原有信息，且产生新的**监视对象信息**（传递给操作系统，开销极大，因为套接字对象受内核管理，存在致命性能弱点）**epoll** 只传递一次
+
+#### epoll
+
+```c
+#include <sys/epoll.h>
+
+int epoll_create(int size);
+int epoll_create1(int flags);
+
+int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event);
+
+int epoll_wait(int epfd, struct epoll_event *events,
+        int maxevents, int timeout);
+int epoll_pwait(int epfd, struct epoll_event *events,
+        int maxevents, int timeout,
+        const sigset_t *sigmask);
+```
+
+##### level-triggered
+
+类似于高电平激活（电气学生的理解），条件触发，**允许用户态任意时刻检测**， 只要有IO事件发生（内核通知文件描述符就绪状态） 随便问，内核一直会通知用户态
+
+##### edge-triggered
+
+边缘触发，类似于`沿边触发器`（奇怪的电气学生）只会通知用户一次，假设在一个客户端请求来了，内核收到通知，在文件描述符状态更改的那一瞬间（最小扫描时钟周期）通知用户态，如果用户态程序不处理这个通知，那么此时更改后的状态被内核记录与下一次比较。Bug点:如果忽略掉一次内核通知，想再获取只能等待文件描述符的状态再次改变（沿边触发！）(好家伙，万一次没读到，直接GG！
+
+写程序注意把套接字改成非阻塞模式，否则停顿，另外需要一次性处理完全部数据，以为只有一次机会
+
+```c
+#include<unistd.h>
+#include<stdlib.h>
+#include<stdio.h>
+#include<string.h>
+#include<sys/socket.h>
+#include<arpa/inet.h>
+#include<sys/epoll.h>
+
+#define BUF_SIZE 4
+#define EPOLL_SIZE 64
+
+void errorHandler(const char* message){
+    perror(message);
+    exit(1);
+}
+
+int main(int argc, char* argv[]){
+    if(argc != 2){
+        printf("Usage: %s <port> \n", argv[0]);
+        exit(1);
+    }
+
+    int sockServ = socket(PF_INET, SOCK_STREAM, 0);
+
+    sockaddr_in servAddr;
+    memset(&servAddr, 0, sizeof(servAddr));
+    servAddr.sin_family = AF_INET;
+    servAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    servAddr.sin_port = htons(atoi(argv[1]));
+
+    if(-1 == bind(sockServ, (sockaddr*)&servAddr, sizeof(servAddr))){
+        errorHandler("bind error!");
+    }
+
+    if(-1 == listen(sockServ, 5)){
+        errorHandler("listen error!");
+    }
+
+    int epfd = epoll_create(EPOLL_SIZE);
+
+    epoll_event event;
+    event.data.fd = sockServ;
+    event.events = EPOLLIN;
+
+    epoll_ctl(epfd, EPOLL_CTL_ADD, sockServ, &event);
+
+    epoll_event* pEvents;
+    pEvents = (epoll_event*)malloc(sizeof(epoll_event)*EPOLL_SIZE);
+
+    int eventCount;
+    char buf[BUF_SIZE];
+    int sockClient;
+    int readLen;
+
+    while(1){
+        eventCount = epoll_wait(epfd, pEvents, EPOLL_SIZE, -1);
+        puts("epoll_wait...");
+
+        for(int i=0;i<eventCount;i++){
+            if(pEvents[i].data.fd == sockServ){ // client connected...
+                sockClient = accept(sockServ,0,0);
+                printf("Client %d connected...\n", sockClient);
+
+                event.data.fd = sockClient;
+                event.events = EPOLLIN;
+
+                epoll_ctl(epfd, EPOLL_CTL_ADD, sockClient, &event);
+            }
+            else{
+                readLen = read(pEvents[i].data.fd, buf, BUF_SIZE);
+                if(readLen == 0){   //client disconnected...
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, pEvents[i].data.fd, NULL);
+                    close(pEvents[i].data.fd);
+                }
+                else{
+                    write(pEvents[i].data.fd, buf, readLen);
+                }
+            }
+        }
+    }
+
+    close(sockServ);
+    close(epfd);
+    return 0;
+}
+```
+
